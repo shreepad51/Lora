@@ -1,0 +1,155 @@
+#include <SPI.h>
+#include <LoRa.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+#include <Wire.h>
+#include <WiFi.h>
+#include <WebServer.h>
+
+#define SCREEN_WIDTH 128 // OLED display width, in pixels
+#define SCREEN_HEIGHT 64 // OLED display height, in pixels
+
+const char* ssid = "ESP32_LoRa_RX";
+const char* password = "12345678";
+WebServer server(80);
+
+String lastMessage = "No data";
+int lastRSSI = 0;
+unsigned long lastRxTime = 0;
+
+#define MAX_MSG 10
+String receivedMsg = "";
+String msgBuffer[MAX_MSG];
+int rssiBuffer[MAX_MSG];
+unsigned long timeBuffer[MAX_MSG];
+
+int msgIndex = 0;
+int msgCount = 0;
+
+/* ---------- Web Page ---------- */
+String webPage() {
+  String page = "<!DOCTYPE html><html><head>";
+  page += "<meta http-equiv='refresh' content='3'>";
+  page += "<title>ESP32 LoRa Receiver</title>";
+  page += "<style>";
+  page += "body{font-family:Arial;background:#f4f4f4;text-align:center;}";
+  page += "table{margin:auto;border-collapse:collapse;width:90%;}";
+  page += "th,td{border:1px solid #999;padding:8px;}";
+  page += "th{background:#333;color:white;}";
+  page += "</style></head><body>";
+
+  page += "<h1>LoRa Receiver - Last 10 Messages</h1>";
+  page += "<table>";
+  page += "<tr><th>#</th><th>Message</th><th>RSSI (dBm)</th><th>Age (sec)</th></tr>";
+
+  for (int i = 0; i < msgCount; i++) {
+    int index = (msgIndex - 1 - i + MAX_MSG) % MAX_MSG;
+
+    page += "<tr>";
+    page += "<td>" + String(i + 1) + "</td>";
+    page += "<td>" + msgBuffer[index] + "</td>";
+    page += "<td>" + String(rssiBuffer[index]) + "</td>";
+    page += "<td>" + String((millis() - timeBuffer[index]) / 1000) + "</td>";
+    page += "</tr>";
+  }
+
+  page += "</table>";
+  page += "</body></html>";
+  return page;
+}
+/* ---------- Web Handler ---------- */
+void handleRoot() {
+  server.send(200, "text/html", webPage());
+}
+
+
+#define OLED_RESET     -1 // Reset pin # (or -1 if sharing Arduino reset pin)
+#define SCREEN_ADDRESS 0x3D ///< See datasheet for Address; 0x3D for 128x64, 0x3C for 128x32
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+
+int rssi;
+int snr;
+
+
+void setup() {
+  Serial.begin(115200);
+  Wire.begin();
+
+   /* ---------- WiFi AP Mode ---------- */
+  WiFi.softAP(ssid, password);
+  Serial.print("Web UI IP: ");
+  Serial.println(WiFi.softAPIP());
+
+  server.on("/", handleRoot);
+  server.begin();
+
+  if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
+  Serial.println("OLED not found");
+  while (1);
+}
+  
+  delay(1000);
+  display.clearDisplay();
+display.setTextSize(1);
+display.setTextColor(SSD1306_WHITE);
+display.setCursor(0, 0);
+display.println("ESP LoRa Receiver");
+display.display();
+  while (!Serial);
+  Serial.println("LoRa Receiver");
+
+  if (!LoRa.begin(433000000)) {
+    Serial.println("Starting LoRa failed!");
+    while (1);
+  }
+}
+
+void loop() {
+  // try to parse packet
+  server.handleClient();
+  int packetSize = LoRa.parsePacket();
+
+ if (packetSize) {
+  msgBuffer[msgIndex] = "";
+  while (LoRa.available()) {
+    msgBuffer[msgIndex] += (char)LoRa.read();
+  }
+
+  //receivedMsg = msgBuffer[msgIndex];
+  Serial.println(msgBuffer[msgIndex]);
+  receivedMsg = msgBuffer[msgIndex];
+  Serial.println(receivedMsg);
+  rssiBuffer[msgIndex] = LoRa.packetRssi();
+  timeBuffer[msgIndex] = millis();
+
+  msgIndex = (msgIndex + 1) % MAX_MSG;
+  if (msgCount < MAX_MSG) msgCount++;
+
+  //Serial.print("Received: ");
+  //Serial.print(msgBuffer[(msgIndex - 1 + MAX_MSG) % MAX_MSG]);
+  //Serial.print(" | RSSI: ");
+  //Serial.println(rssiBuffer[(msgIndex - 1 + MAX_MSG) % MAX_MSG]);
+}
+    //Serial.println(receivedMsg);
+    //lastMessage = receivedMsg;
+    display.clearDisplay();
+    display.setCursor(0, 0);
+    display.println("LORA RECEIVED MSG - ");
+    display.println();
+    display.println(receivedMsg);
+    display.println();
+    
+    display.print("RSSI : ");
+    //rssi = LoRa.packetRssi();
+    //lastRSSI = rssi;
+    lastRxTime = millis();
+    display.println(rssi);
+    snr = LoRa.packetSnr();
+    display.print("SNR : ");
+    display.print(snr);
+    display.display();
+    receivedMsg = "";
+   // display.clearDisplay();
+  
+  }
+
