@@ -1,0 +1,128 @@
+//Receive Lora Msgs and Display on Web UI , and SSD1306
+
+#include <SPI.h>
+#include <LoRa.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+#include <Wire.h>
+#include <WiFi.h>
+#include <WebServer.h>
+
+#define SCREEN_WIDTH 128 // OLED display width, in pixels
+#define SCREEN_HEIGHT 64 // OLED display height, in pixels
+
+const char* ssid = "ESP32_LoRa_RX";
+const char* password = "12345678";
+WebServer server(80);
+
+String lastMessage = "No data";
+int lastRSSI = 0;
+unsigned long lastRxTime = 0;
+
+/* ---------- Web Page ---------- */
+String webPage() {
+  String page = "<!DOCTYPE html><html>";
+  page += "<head>";
+  page += "<meta http-equiv='refresh' content='3'>";
+  page += "<title>ESP32 LoRa Receiver</title>";
+  page += "<style>";
+  page += "body{font-family:Arial;background:#f4f4f4;text-align:center;}";
+  page += ".box{background:white;padding:20px;margin:40px auto;width:80%;border-radius:10px;}";
+  page += "h1{color:#333;}";
+  page += "</style></head><body>";
+
+  page += "<div class='box'>";
+  page += "<h1>LoRa Receiver</h1>";
+  page += "<p><b>Message:</b> " + lastMessage + "</p>";
+  page += "<p><b>RSSI:</b> " + String(lastRSSI) + " dBm</p>";
+  page += "<p><b>Last Update:</b> " + String((millis() - lastRxTime) / 1000) + " sec ago</p>";
+  page += "</div>";
+
+  page += "</body></html>";
+  return page;
+}
+
+/* ---------- Web Handler ---------- */
+void handleRoot() {
+  server.send(200, "text/html", webPage());
+}
+
+String receivedMsg = "";
+#define OLED_RESET     -1 // Reset pin # (or -1 if sharing Arduino reset pin)
+#define SCREEN_ADDRESS 0x3D ///< See datasheet for Address; 0x3D for 128x64, 0x3C for 128x32
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+
+int rssi;
+int snr;
+
+
+void setup() {
+  Serial.begin(9600);
+  Wire.begin();
+
+   /* ---------- WiFi AP Mode ---------- */
+  WiFi.softAP(ssid, password);
+  Serial.print("Web UI IP: ");
+  Serial.println(WiFi.softAPIP());
+
+  server.on("/", handleRoot);
+  server.begin();
+
+  if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
+  Serial.println("OLED not found");
+  while (1);
+}
+  
+  delay(1000);
+  display.clearDisplay();
+display.setTextSize(1);
+display.setTextColor(SSD1306_WHITE);
+display.setCursor(0, 0);
+display.println("ESP LoRa Receiver");
+display.display();
+  while (!Serial);
+  Serial.println("LoRa Receiver");
+
+  if (!LoRa.begin(433000000)) {
+    Serial.println("Starting LoRa failed!");
+    while (1);
+  }
+}
+
+void loop() {
+  // try to parse packet
+  server.handleClient();
+  int packetSize = LoRa.parsePacket();
+  if (packetSize) {
+    // received a packet
+    Serial.print("Received packet '");
+
+    // read packet
+    while (LoRa.available()) {
+      receivedMsg += (char)LoRa.read();
+    }
+
+    Serial.println(receivedMsg);
+    lastMessage = receivedMsg;
+    display.clearDisplay();
+    display.setCursor(0, 0);
+    display.println("LORA RECEIVED MSG - ");
+    display.println();
+    display.println(receivedMsg);
+    display.println();
+    
+
+    display.print("RSSI : ");
+    rssi = LoRa.packetRssi();
+    lastRSSI = rssi;
+    lastRxTime = millis();
+    display.println(rssi);
+    snr = LoRa.packetSnr();
+    display.print("SNR : ");
+    display.print(snr);
+    display.display();
+    receivedMsg = "";
+    display.clearDisplay();
+  
+  }
+}
