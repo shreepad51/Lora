@@ -1,0 +1,187 @@
+// Event based 10 values sending + OLED
+// Last Updated - 18/12/2025   15:20
+// Working
+
+#include <SPI.h>
+#include <LoRa.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+#include <Wire.h>
+#include <WiFi.h>
+
+/* ===== SSE WEB SERVER ===== */
+#include <AsyncTCP.h>
+#include <ESPAsyncWebServer.h>
+
+/* ===== OLED ===== */
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+#define OLED_RESET -1
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+
+/* ===== WiFi ===== */
+const char* ssid = "ESP32_LoRa_RX";
+const char* password = "12345678";
+
+/* ===== SSE SERVER ===== */
+AsyncWebServer server(80);
+AsyncEventSource events("/events");
+
+/* ===== MESSAGE BUFFER ===== */
+#define MAX_MSG 10
+String msgBuffer[MAX_MSG];
+int rssiBuffer[MAX_MSG];
+unsigned long timeBuffer[MAX_MSG];
+
+int msgIndex = 0;
+int msgCount = 0;
+String receivedMsg = "";
+
+/* ===== OLED VALUES ===== */
+int rssi = 0;
+int snr = 0;
+
+/* ===== WEB PAGE (SSE CLIENT) ===== */
+String webPage() {
+  return R"rawliteral(
+<!DOCTYPE html>
+<html>
+<head>
+  <title>ESP32 LoRa Receiver</title>
+  <style>
+    body{font-family:Arial;background:#f4f4f4;text-align:center;}
+    table{margin:auto;border-collapse:collapse;width:90%;}
+    th,td{border:1px solid #999;padding:8px;}
+    th{background:#333;color:white;}
+  </style>
+</head>
+<body>
+
+<h1>LoRa Receiver Live (SSE)</h1>
+
+<table id="tbl">
+<tr>
+  <th>#</th><th>Message</th><th>RSSI (dBm)</th><th>Age (sec)</th>
+</tr>
+</table>
+
+<script>
+const evt = new EventSource("/events");
+
+evt.addEventListener("update", function(e) {
+  const data = JSON.parse(e.data);
+  const tbl = document.getElementById("tbl");
+
+  tbl.innerHTML =
+    "<tr><th>#</th><th>Message</th><th>RSSI</th><th>Age</th></tr>";
+
+  data.forEach((row, i) => {
+    let tr = tbl.insertRow(-1);
+    tr.insertCell(0).innerHTML = i + 1;
+    tr.insertCell(1).innerHTML = row.msg;
+    tr.insertCell(2).innerHTML = row.rssi;
+    tr.insertCell(3).innerHTML = row.age;
+  });
+});
+</script>
+
+</body>
+</html>
+)rawliteral";
+}
+
+/* ===== SEND SSE EVENT ===== */
+void sendEventData() {
+  String json = "[";
+
+  for (int i = 0; i < msgCount; i++) {
+    int index = (msgIndex - 1 - i + MAX_MSG) % MAX_MSG;
+    json += "{";
+    json += "\"msg\":\"" + msgBuffer[index] + "\",";
+    json += "\"rssi\":" + String(rssiBuffer[index]) + ",";
+    json += "\"age\":" + String((millis() - timeBuffer[index]) / 1000);
+    json += "}";
+
+    if (i < msgCount - 1) json += ",";
+  }
+
+  json += "]";
+  events.send(json.c_str(), "update", millis());
+}
+
+/* ===== SETUP ===== */
+void setup() {
+  Serial.begin(115200);
+  Wire.begin();
+
+  /* WiFi AP */
+  WiFi.softAP(ssid, password);
+  Serial.print("Web UI IP: ");
+  Serial.println(WiFi.softAPIP());
+
+  /* Web Server */
+  server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
+    request->send(200, "text/html", webPage());
+  });
+  server.addHandler(&events);
+  server.begin();
+
+  /* OLED */
+  if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
+    Serial.println("OLED not found");
+    while (1);
+  }
+
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(0, 0);
+  display.println("ESP LoRa Receiver");
+  display.display();
+
+  /* LoRa */
+  if (!LoRa.begin(433000000)) {
+    Serial.println("LoRa init failed");
+    while (1);
+  }
+
+  Serial.println("LoRa Receiver Ready");
+}
+
+/* ===== LOOP ===== */
+void loop() {
+  int packetSize = LoRa.parsePacket();
+
+  if (packetSize) {
+    msgBuffer[msgIndex] = "";
+
+    while (LoRa.available()) {
+      msgBuffer[msgIndex] += (char)LoRa.read();
+    }
+
+    receivedMsg = msgBuffer[msgIndex];
+    rssi = LoRa.packetRssi();
+    snr = LoRa.packetSnr();
+
+    rssiBuffer[msgIndex] = rssi;
+    timeBuffer[msgIndex] = millis();
+
+    msgIndex = (msgIndex + 1) % MAX_MSG;
+    if (msgCount < MAX_MSG) msgCount++;
+
+    sendEventData();   // ✅ PUSH SSE
+  }
+
+  /* OLED DISPLAY (UNCHANGED BEHAVIOR) */
+  display.clearDisplay();
+  display.setCursor(0, 0);
+  display.println("LORA RECEIVED MSG -");
+  display.println();
+  display.println(receivedMsg);
+  display.println();
+  display.print("RSSI : ");
+  display.println(rssi);
+  display.print("SNR  : ");
+  display.println(snr);
+  display.display();
+}
