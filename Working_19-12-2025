@@ -1,0 +1,294 @@
+#include <SPI.h>
+#include <LoRa.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+#include <Wire.h>
+#include <WiFi.h>
+#include <AsyncTCP.h>
+#include <ESPAsyncWebServer.h>
+
+/* ================= CONFIG ================= */
+const char* ssid = "ESP32_LoRa_RX";
+const char* password = "12345678";
+
+const long LORA_FREQ = 433000000;   // Hz
+#define MAX_MSG 10
+
+/* ================= OLED ================= */
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+#define OLED_RESET -1
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+
+/* ================= WEB ================= */
+AsyncWebServer server(80);
+AsyncEventSource events("/events");
+
+/* ================= DATA BUFFERS ================= */
+String msgBuffer[MAX_MSG];
+int rssiBuffer[MAX_MSG];
+float snrBuffer[MAX_MSG];
+
+int msgIndex = 0;
+int msgCount = 0;
+
+/* ================= OLED VALUES ================= */
+String receivedMsg = "";
+int rssi = 0;
+float snr = 0;
+
+/* ================= WEB PAGE ================= */
+String webPage() {
+  return R"rawliteral(
+<!DOCTYPE html>
+<html>
+<head>
+<title>LoRa Receiver Dashboard</title>
+
+<style>
+body{font-family:Arial;background:#f4f4f4;text-align:center;}
+
+table{margin:auto;border-collapse:collapse;width:95%;}
+th,td{border:1px solid #999;padding:6px;}
+th{background:#333;color:white;}
+
+button{padding:8px 16px;font-size:14px;margin:12px;}
+
+.signal-box{
+  display:flex;
+  justify-content:center;
+  gap:80px;
+  margin:20px;
+}
+
+.signal{
+  display:flex;
+  align-items:flex-end;
+  gap:6px;
+  height:120px;
+}
+
+.bar{
+  width:18px;
+  background:#ccc;
+  opacity:0.3;
+}
+
+.bar:nth-child(1){height:30px;}
+.bar:nth-child(2){height:50px;}
+.bar:nth-child(3){height:70px;}
+.bar:nth-child(4){height:90px;}
+.bar:nth-child(5){height:110px;}
+
+.bar.active{
+  background:#4CAF50;
+  opacity:1;
+}
+.unit{font-size:12px;margin-top:4px;}
+</style>
+
+</head>
+<body>
+
+<h2>LoRa Receiver Dashboard</h2>
+<p>
+<b>Frequency:</b> <span id="freq">---</span> MHz |
+<b>Total Packets:</b> <span id="counter">0</span>
+</p>
+
+<div class="signal-box">
+
+<div>
+<b>RSSI</b>
+<div class="signal">
+<div class="bar" id="rssi1"></div>
+<div class="bar" id="rssi2"></div>
+<div class="bar" id="rssi3"></div>
+<div class="bar" id="rssi4"></div>
+<div class="bar" id="rssi5"></div>
+</div>
+<div class="unit">dBm</div>
+</div>
+
+<div>
+<b>SNR</b>
+<div class="signal">
+<div class="bar" id="snr1"></div>
+<div class="bar" id="snr2"></div>
+<div class="bar" id="snr3"></div>
+<div class="bar" id="snr4"></div>
+<div class="bar" id="snr5"></div>
+</div>
+<div class="unit">dB</div>
+</div>
+
+</div>
+
+<table id="tbl">
+<tr>
+<th>#</th>
+<th>Message</th>
+<th>RSSI</th>
+<th>SNR</th>
+<th>Timestamp</th>
+</tr>
+</table>
+
+<button onclick="downloadCSV()">Download CSV</button>
+
+<script>
+const MAX_MSG = 10;
+let packetCounter = 0;
+let history = [];
+
+const evt = new EventSource("/events");
+
+function rssiBars(r){
+  if(r >= -50) return 5;
+  if(r >= -60) return 4;
+  if(r >= -80) return 3;
+  if(r >= -100) return 2;
+  return 1;
+}
+
+function snrBars(s){
+  if(s >= 8) return 5;
+  if(s >= 5) return 4;
+  if(s >= 2) return 3;
+  if(s >= 0) return 2;
+  return 1;
+}
+
+function updateBars(prefix, count){
+  for(let i=1;i<=5;i++){
+    const el=document.getElementById(prefix+i);
+    if(i<=count) el.classList.add("active");
+    else el.classList.remove("active");
+  }
+}
+
+evt.addEventListener("update", function(e){
+  const payload = JSON.parse(e.data);
+  const latest = payload.messages[0];
+
+  packetCounter++;
+  const ts = new Date().toLocaleString();
+
+  history.unshift({
+    index: packetCounter,
+    msg: latest.msg,
+    rssi: latest.rssi,
+    snr: latest.snr,
+    time: ts
+  });
+
+  if(history.length > MAX_MSG) history.pop();
+
+  document.getElementById("freq").innerText =
+    (payload.frequency/1e6).toFixed(3);
+  document.getElementById("counter").innerText = packetCounter;
+
+  updateBars("rssi", rssiBars(latest.rssi));
+  updateBars("snr",  snrBars(latest.snr));
+
+  const tbl=document.getElementById("tbl");
+  tbl.innerHTML =
+    "<tr><th>#</th><th>Message</th><th>RSSI</th><th>SNR</th><th>Timestamp</th></tr>";
+
+  history.forEach(r=>{
+    let tr=tbl.insertRow(-1);
+    tr.insertCell(0).innerHTML=r.index;
+    tr.insertCell(1).innerHTML=r.msg;
+    tr.insertCell(2).innerHTML=r.rssi;
+    tr.insertCell(3).innerHTML=r.snr;
+    tr.insertCell(4).innerHTML=r.time;
+  });
+});
+
+function downloadCSV(){
+  let csv="Index,Message,RSSI_dBm,SNR_dB,Timestamp\n";
+  history.slice().reverse().forEach(r=>{
+    csv+=`${r.index},"${r.msg}",${r.rssi},${r.snr},"${r.time}"\n`;
+  });
+  const blob=new Blob([csv],{type:"text/csv"});
+  const url=URL.createObjectURL(blob);
+  const a=document.createElement("a");
+  a.href=url;a.download="lora_log.csv";a.click();
+  URL.revokeObjectURL(url);
+}
+</script>
+
+</body>
+</html>
+)rawliteral";
+}
+
+/* ================= SEND SSE ================= */
+void sendEventData() {
+  String json="{\"frequency\":"+String(LORA_FREQ)+",\"messages\":[";
+  for(int i=0;i<msgCount;i++){
+    int idx=(msgIndex-1-i+MAX_MSG)%MAX_MSG;
+    json+="{\"msg\":\""+msgBuffer[idx]+"\",\"rssi\":"+String(rssiBuffer[idx])+
+          ",\"snr\":"+String(snrBuffer[idx],1)+"}";
+    if(i<msgCount-1) json+=",";
+  }
+  json+="]}";
+  events.send(json.c_str(),"update",millis());
+}
+
+/* ================= SETUP ================= */
+void setup(){
+  Serial.begin(115200);
+  Wire.begin();
+
+  WiFi.softAP(ssid,password);
+  Serial.println(WiFi.softAPIP());
+
+  server.on("/",HTTP_GET,[](AsyncWebServerRequest *r){
+    r->send(200,"text/html",webPage());
+  });
+  server.addHandler(&events);
+  server.begin();
+
+  display.begin(SSD1306_SWITCHCAPVCC,0x3C);
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(0,0);
+  display.println("ESP LoRa Receiver");
+  display.display();
+
+  if(!LoRa.begin(LORA_FREQ)){
+    while(1);
+  }
+}
+
+/* ================= LOOP ================= */
+void loop(){
+  int p=LoRa.parsePacket();
+  if(p){
+    msgBuffer[msgIndex]="";
+    while(LoRa.available())
+      msgBuffer[msgIndex]+=(char)LoRa.read();
+
+    receivedMsg=msgBuffer[msgIndex];
+    rssi=LoRa.packetRssi();
+    snr=LoRa.packetSnr();
+
+    rssiBuffer[msgIndex]=rssi;
+    snrBuffer[msgIndex]=snr;
+
+    msgIndex=(msgIndex+1)%MAX_MSG;
+    if(msgCount<MAX_MSG) msgCount++;
+
+    sendEventData();
+  }
+
+  display.clearDisplay();
+  display.setCursor(0,0);
+  display.println("LORA RECEIVED MSG");
+  display.println(receivedMsg);
+  display.print("RSSI: ");display.println(rssi);
+  display.print("SNR : ");display.println(snr,1);
+  display.display();
+}
